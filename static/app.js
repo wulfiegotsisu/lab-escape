@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const app = $('app');
 let game = null, socket = null, session = null, seq = [], chatDraft = '', timerOffset = 0, toastTimer = null;
 let enterCode = '';
+let restoringTextFocus = false;
 let miniTask = null;
 let miniModalActive = false;
 let dragState = null;
@@ -275,10 +276,26 @@ function connect(){
  socket.onerror=()=>console.warn('WebSocket connection error');
 }
 function send(action, payload={}){if(!socket || socket.readyState!==WebSocket.OPEN){toast('You are not connected. Try reconnecting.');return;}socket.send(JSON.stringify({action,...payload}));}
-function render(){ if(!game)return;
- if(game.status==='lobby')return lobby();
- if(game.status==='won')return victory();
- return play();
+function render(){
+ if(!game)return;
+ // Multiplayer updates replace the page markup. Keep keyboard focus and cursor
+ // position in fields that a player may be typing into when a state arrives.
+ const active=document.activeElement;
+ const typing=active && ['pin','chat-text'].includes(active.id)
+   ? {id:active.id, start:active.selectionStart, end:active.selectionEnd} : null;
+ if(game.status==='lobby')lobby();
+ else if(game.status==='won')victory();
+ else play();
+ if(typing){
+  const field=$(typing.id);
+  if(field && !field.disabled){
+   restoringTextFocus=true;
+   try{
+    field.focus({preventScroll:true});
+    if(typing.start!==null && typing.end!==null)field.setSelectionRange(typing.start,typing.end);
+   }finally{restoringTextFocus=false;}
+  }
+ }
 }
 function lobby(){const host=game.you.isHost;const you=game.you;const players=game.players;
  app.innerHTML=header(`<span class="pill">ROOM: ${esc(game.room)}</span>`)+`<section class="lobby"><div class="lobbyhero"><div class="eyebrow">✦ TEAM ASSEMBLY ✦</div><h1>THE ESCAPE CREW</h1><p class="muted">Recruit your partner. Two creatures, two abilities, one way out.</p></div>
@@ -352,7 +369,7 @@ document.addEventListener('submit', async e=>{
  if(e.target.id==='equation-form'){e.preventDefault();const val=e.target.elements.namedItem('answer').value.trim();if(Number(val)===game.taskConfig?.answer)finishTask(val);else taskMisstep('The load is incorrect. Check the coils and reserve units.');return;}
  if(e.target.id==='code-form'){e.preventDefault();const pin=$('pin')?.value.trim();if(pin&&pin.length===4){sound('tap');send('submit_code',{code:pin});}}
 });
-document.addEventListener('focusin',e=>{if(e.target.id==='pin')send('move_to',{target:'terminal'});});
+document.addEventListener('focusin',e=>{if(e.target.id==='pin'&&!restoringTextFocus&&game?.actors?.[game.you.role]?.target!=='terminal')send('move_to',{target:'terminal'});});
 document.addEventListener('input',e=>{if(e.target.id==='chat-text')chatDraft=e.target.value;if(e.target.id==='pin')enterCode=e.target.value.replace(/\D/g,'').slice(0,4);});
 document.addEventListener('click',e=>{
  if(e.target.id==='paws-modal-layer'){closePopup();return;}
