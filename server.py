@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operation P.A.W.S. local real-time multiplayer server. Requires aiohttp."""
+"""Operation Lab Escape local real-time multiplayer server. Requires aiohttp."""
 import asyncio
 import json
 import os
@@ -15,26 +15,68 @@ BASE = Path(__file__).resolve().parent
 ROOMS = {}
 ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 ROLE_NAMES = {'mouse': 'Pip the Mouse', 'chameleon': 'Echo the Chameleon'}
-CLUES = [
-    {
-        'mouse': {'title': 'Inside the ventilation shaft', 'body': 'Four wires are tagged with numbers: RED = 7, BLUE = 2, GREEN = 9, YELLOW = 4. Someone must find the color order.'},
-        'chameleon': {'title': 'Invisible door markings', 'body': 'Under your enhanced vision, the hidden color sequence glows: GREEN → RED → YELLOW → BLUE. Another animal must find the numbers.'},
-    },
-    {
-        'mouse': {'title': 'Torn laboratory protocol', 'body': 'The mixing order is: 1. CATALYST, 2. STABILIZER, 3. ACTIVATOR. The vial colors are missing from this page.'},
-        'chameleon': {'title': 'Spectral vial labels', 'body': 'Your UV vision reveals: CATALYST = VIOLET; STABILIZER = AMBER; ACTIVATOR = CYAN. Ask Pip which comes first.'},
-    },
-    {
-        'mouse': {'title': 'Power-grid wire map', 'body': 'The security relay wires are labeled: NORTH = 8, SOUTH = 5, EAST = 2, WEST = 6. Echo can read the hidden sequence.'},
-        'chameleon': {'title': 'Ghosted security instructions', 'body': 'The security AI left a concealed routing order: EAST → WEST → NORTH → SOUTH. Ask Pip for the numbers, then coordinate the levers.'},
-    },
+COLORS = ['red', 'blue', 'green', 'yellow']
+VIAL_COLORS = ['violet', 'amber', 'cyan']
+INGREDIENTS = ['CATALYST', 'STABILIZER', 'ACTIVATOR']
+DIRECTIONS = ['NORTH', 'SOUTH', 'EAST', 'WEST']
+CLUE_TITLES = [
+    {'mouse':'Inside the ventilation shaft','chameleon':'Invisible door markings'},
+    {'mouse':'Torn laboratory protocol','chameleon':'Spectral vial labels'},
+    {'mouse':'Power-grid wire map','chameleon':'Ghosted security instructions'},
 ]
+ACTOR_TARGETS = {
+  0: {'mouse': {'clue': 49, 'terminal': 178}, 'chameleon': {'clue': 238, 'terminal': 264}},
+  1: {'mouse': {'clue': 58, 'terminal': 163}, 'chameleon': {'clue': 238, 'terminal': 163}},
+  2: {'mouse': {'clue': 55, 'terminal': 158, 'lever': 67}, 'chameleon': {'clue': 240, 'terminal': 158, 'lever': 246}},
+}
+
+def generate_puzzles(previous=None):
+    # Generate an independent solution for each room, shared by this two-player lobby.
+    # On replay, reroll until all three cooperative answers differ from the previous game.
+    if previous is not None:
+        for _ in range(50):
+            fresh = generate_puzzles()
+            if all(fresh[i]['answer'] != previous[i]['answer'] for i in range(3)):
+                return fresh
+        return fresh
+    digits = random.sample('123456789', 8)
+    order0 = random.sample(COLORS, 4)
+    mapping0 = dict(zip(COLORS, digits[:4]))
+    names1 = random.sample(INGREDIENTS, 3)
+    mapping1 = dict(zip(INGREDIENTS, random.sample(VIAL_COLORS, 3)))
+    order2 = random.sample(DIRECTIONS, 4)
+    mapping2 = dict(zip(DIRECTIONS, digits[4:8]))
+    coils, draw, reserve = random.randint(2, 5), random.randint(3, 7), random.randint(2, 9)
+    puzzles = [
+      {'mapping': mapping0, 'order': order0, 'answer': ''.join(mapping0[c] for c in order0),
+       'wires': {'sources': random.sample(COLORS, 4), 'sockets': random.sample(COLORS, 4)},
+       'crankTurns': random.choice([2.5, 3, 3.5, 4])},
+      {'mapping': mapping1, 'order': names1, 'answer': [mapping1[c] for c in names1],
+       'stirTurns': random.choice([2.5, 3, 3.5, 4])},
+      {'mapping': mapping2, 'order': order2, 'answer': ''.join(mapping2[d] for d in order2),
+       'calibration': {'coils': coils, 'draw': draw, 'reserve': reserve, 'answer': coils*draw+reserve},
+       'frequencies': dict(zip(['a','b','c'], random.sample([240,410,680], 3)))},
+    ]
+    puzzles[2]['frequencyOrder'] = sorted(puzzles[2]['frequencies'],key=puzzles[2]['frequencies'].get)
+    return puzzles
+
 ROOM_NAMES = ['Containment Chamber', 'Experimental Storage', 'Security Control', 'Freedom!']
 HINTS = [
-    ['Click your character-specific highlighted object to inspect it.', 'Pip finds color-number pairs; Echo discovers an order of colors. Combine both clues.', 'The entry code is 9742. Echo must type it into the door keypad.'],
-    ['Investigate the log and spectral vials before using the mixer.', 'Pip knows which ingredient goes first. Echo knows the color of each ingredient.', 'Select VIOLET → AMBER → CYAN, then click MIX on Pip’s screen.'],
-    ['Inspect the grid and ghost display to unlock the power keypad.', 'Convert Echo’s direction order to numbers using Pip’s wire map. After powering up, both players must pull their own levers quickly.', 'The power code is 2685. Both players need to pull their levers within 12 seconds.'],
+    ['Repair or activate your character-specific device to inspect a clue.', 'Combine the colored wire digits with the ultraviolet color sequence.', None],
+    ['Reassemble the protocol and reveal the spectral labels.', 'Match each ingredient in the numbered protocol with its vial color.', None],
+    ['Fix the power grid and ghost display to receive two complementary clues.', 'Read the directional wire map using the ghost display order, then coordinate the levers.', None],
 ]
+
+def dynamic_hint(room, stage, level):
+    if level < 3:
+        return HINTS[stage][level-1]
+    p = room['puzzles'][stage]
+    if stage == 0:
+        return f"The keypad code is {p['answer']}. The chameleon enters it."
+    if stage == 1:
+        return 'Select ' + ' → '.join(x.upper() for x in p['answer']) + ', then mix on the mouse screen.'
+    return f"The relay code is {p['answer']}. Both players must pull their levers within 12 seconds."
+
 
 def clean_name(value):
     value = str(value or '').strip()[:24]
@@ -48,7 +90,9 @@ def new_room():
     return {'code': code, 'players': {}, 'ws': {}, 'host': None, 'status': 'lobby', 'stage': 0,
             'revealed': {'mouse': False, 'chameleon': False}, 'powered': False, 'levers': {},
             'deadline': None, 'messages': [], 'activity': [], 'hints_used': 0,
-            'hint_levels': {}, 'started_at': None, 'finished_at': None, 'created_at': time.time()}
+            'hint_levels': {}, 'started_at': None, 'finished_at': None, 'created_at': time.time(),
+            'puzzles': generate_puzzles(), 'actors': {'mouse': {'x': 139, 'working': False, 'target': ''},
+                                                         'chameleon': {'x': 179, 'working': False, 'target': ''}}}
 
 def add_player(room, name):
     role = 'mouse' if not any(x['role'] == 'mouse' for x in room['players'].values()) else 'chameleon'
@@ -80,8 +124,19 @@ def serialize(room, token):
         'revealed': dict(room['revealed']), 'powered': room['powered'],
         'leverRoles': [room['players'][t]['role'] for t in room['levers'] if t in room['players']],
         'deadline': room['deadline'], 'serverTime': time.time(),
-        'privateClue': {'title': CLUES[stage][role]['title']} if stage < 3 and room['revealed'][role] else None,
-        'hint': personalize(HINTS[stage][min(hint_level - 1, 2)], room) if 0 < hint_level and stage < 3 else None,
+        'privateClue': {'title': CLUE_TITLES[stage][role]} if stage < 3 and room['revealed'][role] else None,
+        'evidence': (
+            ({'order': room['puzzles'][stage]['order']} if stage == 1 else {'mapping': room['puzzles'][stage]['mapping']})
+            if role == 'mouse' else
+            ({'mapping': room['puzzles'][stage]['mapping']} if stage == 1 else {'order': room['puzzles'][stage]['order']})
+        ) if stage < 3 and room['revealed'][role] else None,
+        'taskConfig': (
+            (room['puzzles'][0]['wires'] if role == 'mouse' else {'turns': room['puzzles'][0]['crankTurns']}) if stage == 0 else
+            ({'fragments': dict(zip(['I','II','III'], room['puzzles'][1]['order']))} if role == 'mouse' else {'turns':room['puzzles'][1]['stirTurns']}) if stage == 1 else
+            (room['puzzles'][2]['calibration'] if role == 'mouse' else {'frequencies':room['puzzles'][2]['frequencies']})
+        ) if stage < 3 else None,
+        'actors': room['actors'],
+        'hint': personalize(dynamic_hint(room, stage, hint_level), room) if hint_level > 0 and stage < 3 else None,
         'hintLevel': hint_level, 'hintsUsed': room['hints_used'],
         'messages': room['messages'][-40:], 'activity': room['activity'][-12:],
         'startedAt': room['started_at'], 'finishedAt': room['finished_at'],
@@ -107,10 +162,11 @@ def next_room(room):
     room['powered'] = False
     room['levers'] = {}
     room['deadline'] = None
+    room['actors'] = {'mouse': {'x': 139, 'working': False, 'target': ''}, 'chameleon': {'x': 179, 'working': False, 'target': ''}}
     if room['stage'] == 3:
         room['status'] = 'won'
         room['finished_at'] = time.time()
-        log(room, 'The security AI is offline. Operation P.A.W.S. succeeded!')
+        log(room, 'The security AI is offline. Operation Lab Escape succeeded!')
     else:
         log(room, f'Door opened! The team entered {ROOM_NAMES[room["stage"]]}.')
 
@@ -157,6 +213,19 @@ async def handle_action(room, token, data):
         for player in room['players'].values():
             player['role'] = 'chameleon' if player['role'] == 'mouse' else 'mouse'
         log(room, 'The animals swapped roles.')
+    elif action in ('work_start', 'work_stop', 'move_to'):
+        if room['status'] != 'playing' or stage > 2:
+            return 'Movement is unavailable.'
+        actor = room['actors'][role]
+        if action == 'work_stop':
+            actor['working'] = False
+        else:
+            target = str(data.get('target') or 'clue')
+            if target not in ACTOR_TARGETS[stage][role]:
+                return 'This mechanism is inaccessible.'
+            actor['x'] = ACTOR_TARGETS[stage][role][target]
+            actor['target'] = target
+            actor['working'] = action == 'work_start'
     elif action == 'complete_task':
         # Mini-interactions now gate evidence discovery. Puzzle answers remain unchanged.
         if room['status'] != 'playing' or stage > 2:
@@ -168,12 +237,13 @@ async def handle_action(room, token, data):
                 (0,'chameleon'): 'uv-charged',
                 (1,'mouse'): ['I','II','III'],
                 (1,'chameleon'): 'vials-whisked',
-                (2,'mouse'): '17',
-                (2,'chameleon'): ['low','mid','high'],
+                (2,'mouse'): str(room['puzzles'][2]['calibration']['answer']),
+                (2,'chameleon'): room['puzzles'][2]['frequencyOrder'],
             }
             if proof != checks[(stage,role)]:
                 return 'The laboratory mechanism is not yet calibrated. Finish the interaction first.'
             room['revealed'][role] = True
+            room['actors'][role]['working'] = False
             log(room, f'{p["name"]} completed a laboratory mechanism and uncovered evidence.')
     elif action == 'reveal':
         return 'Complete the interactive laboratory mechanism to uncover your clue.'
@@ -186,7 +256,7 @@ async def handle_action(room, token, data):
         if role != expected_role:
             return 'Only the animal at this terminal can use it.'
         supplied = str(data.get('code') or '').strip()
-        expected = '9742' if stage == 0 else '2685'
+        expected = room['puzzles'][stage]['answer']
         if supplied != expected:
             log(room, 'ACCESS DENIED. The keypad flashes red.')
             return 'Access denied. Compare both animals’ clues and try again.'
@@ -200,7 +270,7 @@ async def handle_action(room, token, data):
             return personalize('Only Pip can operate the mixing station.', room)
         if not all(room['revealed'].values()):
             return 'Both animals must inspect their clues first.'
-        if data.get('sequence') != ['violet', 'amber', 'cyan']:
+        if data.get('sequence') != room['puzzles'][1]['answer']:
             log(room, 'The mixer sputters. Incorrect reagent order!')
             return 'Incorrect reagent order. Check the protocol and spectral labels.'
         next_room(room)
@@ -240,6 +310,8 @@ async def handle_action(room, token, data):
     elif action == 'restart':
         if token != room['host'] or room['status'] != 'won':
             return 'Only the host can restart after escaping.'
+        room['puzzles'] = generate_puzzles(room['puzzles'])
+        room['actors'] = {'mouse': {'x': 139, 'working': False, 'target': ''}, 'chameleon': {'x': 179, 'working': False, 'target': ''}}
         room.update({'status':'lobby','stage':0,'revealed':{'mouse':False,'chameleon':False},'powered':False,
                      'deadline':None,'levers':{},'messages':[],'activity':[],'hints_used':0,
                      'started_at':None,'finished_at':None})
@@ -301,5 +373,5 @@ app.router.add_static('/static', BASE / 'static', show_index=False)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', '8000'))
-    print(f'\nOperation P.A.W.S. running at http://localhost:{port}\n', flush=True)
+    print(f'\nOperation Lab Escape running at http://localhost:{port}\n', flush=True)
     web.run_app(app, host='0.0.0.0', port=port, print=None)

@@ -4,6 +4,10 @@ const app = $('app');
 let game = null, socket = null, session = null, seq = [], chatDraft = '', timerOffset = 0, toastTimer = null;
 let enterCode = '';
 let miniTask = null;
+let miniModalActive = false;
+let dragState = null;
+let actorDisplay = {mouse:139,chameleon:179};
+let previousCanvasStage = -1;
 let victoryAnimated = false;
 const names = ['CONTAINMENT CHAMBER', 'EXPERIMENTAL STORAGE', 'SECURITY CONTROL', 'FREEDOM'];
 const objectives = [
@@ -52,50 +56,39 @@ function sound(type='tap') {
   }
  } catch(e) { console.warn('Audio playback unavailable',e); }
 }
-// Original spooky ambient score synthesized live: no copyrighted recordings or external assets.
+// Original spooky laboratory escape theme, composed specifically for this game.
+// Pre-rendered music box melody, pulsing bass, eerie chords and mechanical percussion.
+// Kept separate from one-shot WebAudio sound effects and controlled by MUSIC ON/OFF.
 let musicOn = (()=>{try{return localStorage.getItem('paws-music') !== 'off';}catch{return true;}})();
-let musicBus=null, musicOscillators=[], musicClock=null, nextMusicAt=0, musicNote=0;
-function initAudio(){
- try {
-  const Audio=window.AudioContext||window.webkitAudioContext;
-  if(!Audio)return false;
-  if(!audioContext)audioContext=new Audio();
-  if(audioContext.state==='suspended')audioContext.resume().catch(()=>{});
-  return true;
- }catch{return false;}
-}
-function musicTick(){
- if(!musicOn||!audioContext||!musicBus)return;
- const now=audioContext.currentTime;
- const notes=[196,155.56,174.61,130.81,196,146.83,155.56,116.54]; // a slow original minor-key motif
- while(nextMusicAt<now+1.5){
-  const base=notes[musicNote++%notes.length], at=Math.max(nextMusicAt,now+.02);
-  const osc=audioContext.createOscillator(),amp=audioContext.createGain();
-  osc.type='sine';osc.frequency.setValueAtTime(base,at);
-  amp.gain.setValueAtTime(.0001,at);amp.gain.linearRampToValueAtTime(.06,at+.09);
-  amp.gain.exponentialRampToValueAtTime(.0001,at+1.7);
-  osc.connect(amp).connect(musicBus);osc.start(at);osc.stop(at+1.78);
-  nextMusicAt=at+1.8;
+let musicTrack = null;
+function getMusicTrack(){
+ if(!musicTrack){
+  musicTrack = new Audio('/static/audio/lab_escape_theme.mp3');
+  musicTrack.loop = true;
+  musicTrack.preload = 'auto';
+  musicTrack.volume = 0.58;
  }
+ return musicTrack;
 }
 function startMusic(){
- if(!musicOn||musicBus||!initAudio())return;
- const ctx=audioContext;
- musicBus=ctx.createGain();musicBus.gain.value=.30;musicBus.connect(ctx.destination);
- for(const [freq,kind,level] of [[65.41,'sine',.12],[98,'triangle',.035],[130.81,'sine',.027]]){
-  const osc=ctx.createOscillator(),amp=ctx.createGain();osc.type=kind;osc.frequency.value=freq;
-  amp.gain.value=level;osc.connect(amp).connect(musicBus);osc.start();musicOscillators.push(osc);
+ if(!musicOn)return;
+ const track = getMusicTrack();
+ if(track.paused){
+  // Browser autoplay rules require a player gesture before starting playback.
+  track.play().catch(err=>{if(err.name!=='NotAllowedError')console.warn('Music playback unavailable:',err);});
  }
- nextMusicAt=ctx.currentTime+.03;musicTick();musicClock=setInterval(musicTick,700);
 }
 function stopMusic(){
- if(musicClock){clearInterval(musicClock);musicClock=null;}
- for(const osc of musicOscillators){try{osc.stop();}catch{}}
- musicOscillators=[];
- if(musicBus){try{musicBus.disconnect();}catch{}musicBus=null;}
+ if(musicTrack){musicTrack.pause();musicTrack.currentTime=0;}
 }
-function updateMusicButton(){const btn=document.querySelector('[data-action="toggle-music"]');if(btn){btn.textContent=musicOn?'♫ MUSIC ON':'♪ MUSIC OFF';btn.setAttribute('aria-pressed',String(musicOn));}}
-// Audio on browsers starts only after the player's first tap/key press.
+function updateMusicButton(){
+ const btn=document.querySelector('[data-action="toggle-music"]');
+ if(btn){
+  btn.textContent=musicOn?'♫ MUSIC ON':'♪ MUSIC OFF';
+  btn.setAttribute('aria-pressed',String(musicOn));
+ }
+}
+// Music begins after the first click/tap/key press so it also works on phones.
 document.addEventListener('pointerdown',()=>{if(musicOn)startMusic();},{passive:true});
 document.addEventListener('keydown',()=>{if(musicOn)startMusic();});
 function updateSoundButton() {
@@ -107,21 +100,22 @@ function vialArt(color, caption='', size='') {
  return `<div class="illustrated-vial ${safe} ${size}"><div class="vial-cap"></div><div class="vial-neck"></div><div class="vial-glass"><div class="vial-fluid"></div><i class="vial-bubble b1"></i><i class="vial-bubble b2"></i><i class="vial-shine"></i></div>${caption?`<div class="vial-caption">${esc(caption)}</div>`:''}</div>`;
 }
 function illustratedClue() {
- const stage=game.stage, role=game.you.role;
- if(stage===0 && role==='mouse')return `<div class="clue-wires">${[['red','7'],['blue','2'],['green','9'],['yellow','4']].map(([c,n])=>`<div class="clue-wire ${c}"><span class="wire"></span><b>${n}</b></div>`).join('')}</div>`;
- if(stage===0)return `<div class="uv-sequence">${['green','red','yellow','blue'].map((color,i)=>`<span class="uv-dot ${color}" title="${color}">${i+1}</span>`).join('')}</div><p class="diagram-caption">Invisible markings revealed in ultraviolet light</p>`;
- if(stage===1 && role==='mouse')return `<div class="protocol-diagram">${['CATALYST','STABILIZER','ACTIVATOR'].map((name,i)=>`<span><b>0${i+1}</b> ${name}</span>`).join('')}</div>`;
- if(stage===1)return `<div class="vial-gallery">${vialArt('violet','CATALYST')}${vialArt('amber','STABILIZER')}${vialArt('cyan','ACTIVATOR')}</div>`;
- if(stage===2 && role==='mouse')return `<div class="circuit-diagram">${[['N','8'],['S','5'],['E','2'],['W','6']].map(([d,n])=>`<span><b>${d}</b> = ${n}</span>`).join('')}</div>`;
- if(stage===2)return `<div class="direction-diagram">${['EAST','WEST','NORTH','SOUTH'].map(x=>`<span>${{EAST:'→',WEST:'←',NORTH:'↑',SOUTH:'↓'}[x]}<small>${x}</small></span>`).join('')}</div>`;
+ const stage=game.stage, role=game.you.role, data=game.evidence;
+ if(!data)return '<p>Evidence not yet discovered.</p>';
+ if(stage===0 && role==='mouse')return `<div class="clue-wires">${['red','blue','green','yellow'].map(c=>`<div class="clue-wire ${c}"><span class="wire"></span><b>${esc(data.mapping[c])}</b></div>`).join('')}</div>`;
+ if(stage===0)return `<div class="uv-sequence">${data.order.map((color,i)=>`<span class="uv-dot ${color}" title="${color}">${i+1}</span>`).join('')}</div><p class="diagram-caption">Invisible markings revealed under ultraviolet light</p>`;
+ if(stage===1 && role==='mouse')return `<div class="protocol-diagram">${data.order.map((name,i)=>`<span><b>0${i+1}</b> ${esc(name)}</span>`).join('')}</div>`;
+ if(stage===1)return `<div class="vial-gallery">${['CATALYST','STABILIZER','ACTIVATOR'].map(x=>vialArt(data.mapping[x],x)).join('')}</div>`;
+ if(stage===2 && role==='mouse')return `<div class="circuit-diagram">${[['N','NORTH'],['S','SOUTH'],['E','EAST'],['W','WEST']].map(([short,name])=>`<span><b>${short}</b> = ${esc(data.mapping[name])}</span>`).join('')}</div>`;
+ if(stage===2)return `<div class="direction-diagram">${data.order.map(x=>`<span>${{EAST:'→',WEST:'←',NORTH:'↑',SOUTH:'↓'}[x]}<small>${x}</small></span>`).join('')}</div>`;
  return '';
 }
 const mechanismSpecs = [
- {mouse:['RECONNECT THE VENT WIRES','Tap a loose wire, then tap its matching colored socket. Connect all four to light the inspection panel.'],
-  chameleon:['POWER THE UV SCANNER','Crank the generator five times to charge the ultraviolet lamp.']},
+ {mouse:['RECONNECT THE VENT WIRES','Drag each loose wire all the way onto the matching colored socket. Releasing early or over a wrong socket will not connect it.'],
+  chameleon:['POWER THE UV SCANNER','Hold and trace circles around the generator handle with your mouse or finger until the ultraviolet lamp is charged.']},
  {mouse:['REASSEMBLE THE PROTOCOL','The torn lab pages have tiny Roman numeral tabs. Tap the fragments in their numbered order.'],
-  chameleon:['PREPARE THE SPECTRAL REAGENT','Stir the glowing sample six times to reveal the labels hidden in the vial rack.']},
- {mouse:['REPAIR THE AUXILIARY CIRCUIT','Compute the calibration load: three coils draw four units each, plus five units of reserve power.'],
+  chameleon:['PREPARE THE SPECTRAL REAGENT','Stir the glowing sample by tracing circles inside the vessel using your mouse or finger.']},
+ {mouse:['REPAIR THE AUXILIARY CIRCUIT','Compute the calibration load from the coils, power draw, and reserve power shown below.'],
   chameleon:['CALIBRATE THE GHOST FREQUENCY','Activate the signal bands from lowest frequency to highest frequency.']},
 ];
 function taskKey(){return game.stage+'-'+game.you.role;}
@@ -129,17 +123,24 @@ function getTask(){if(!miniTask||miniTask.key!==taskKey())miniTask={key:taskKey(
 function taskMarkup(){
  const role=game.you.role,stage=game.stage,m=getTask();
  if(stage===0&&role==='mouse'){
-  const colors=['red','blue','green','yellow']; const sockets=['yellow','green','red','blue'];
-  return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[0][role][1]}</p><div class="wire-connect"><div class="wire-bank">${colors.map(col=>`<button class="wire-port ${col} ${m.selected===col?'active':''} ${m.progress.includes(col)?'connected':''}" data-wire="${col}" ${m.progress.includes(col)?'disabled':''}>${col.toUpperCase()} WIRE</button>`).join('')}</div><div class="wire-center">${colors.map(col=>`<div class="wire-line ${m.progress.includes(col)?col:''}"></div>`).join('')}</div><div class="wire-bank">${sockets.map(col=>`<button class="wire-port ${col} ${m.progress.includes(col)?'connected':''}" data-socket="${col}" ${m.progress.includes(col)?'disabled':''}>${col.toUpperCase()} SOCKET</button>`).join('')}</div></div><div class="mini-status">${m.progress.length}/4 circuits restored</div></div>`;
+  const colors=game.taskConfig?.sources||['red','blue','green','yellow'];const sockets=game.taskConfig?.sockets||['yellow','green','red','blue'];
+  return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[0][role][1]}</p><div class="wire-connect wire-drag-board"><div class="wire-bank">${colors.map(col=>`<button type="button" class="wire-port ${col} ${m.progress.includes(col)?'connected':''}" data-wire="${col}" ${m.progress.includes(col)?'disabled':''}>${col.toUpperCase()} WIRE ●</button>`).join('')}</div><svg class="wire-svg" aria-hidden="true"><g class="wire-connections"></g><path class="wire-preview" /></svg><div class="wire-bank">${sockets.map(col=>`<button type="button" class="wire-port ${col} ${m.progress.includes(col)?'connected':''}" data-socket="${col}" ${m.progress.includes(col)?'disabled':''}>● ${col.toUpperCase()} SOCKET</button>`).join('')}</div></div><div class="mini-status" aria-live="polite">${m.progress.length}/4 circuits restored</div></div>`;
  }
- if(stage===0&&role==='chameleon')return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[0][role][1]}</p><div class="uv-machine"><div class="uv-eye" style="--charge:${m.count/5}">◉</div><div class="charge-track"><div style="width:${m.count*20}%"></div></div><button class="btn amber mini-action" data-minitap="charge">⚙ CRANK GENERATOR</button><div class="mini-status">${m.count}/5 cranks · UV charge</div></div></div>`;
+ if(stage===0&&role==='chameleon')return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[0][role][1]}</p><div class="uv-machine"><div class="gesture-wheel generator" data-gesture="crank" role="img" aria-label="Drag around the generator wheel in circles to charge UV power"><div class="gesture-ring"></div><div class="gesture-knob">⚙</div><div class="gesture-handle"></div></div><div class="charge-track"><div style="width:${Math.min(100,m.count/(game.taskConfig?.turns||3)*100)}%"></div></div><div class="mini-status">${Math.floor(m.count*10)/10}/${game.taskConfig?.turns||3} circular turns · UV charge</div></div></div>`;
  if(stage===1&&role==='mouse'){
-  const parts=[['III','ACTIVATOR'],['I','CATALYST'],['II','STABILIZER']];
+  const fragments=game.taskConfig?.fragments||{'I':'CATALYST','II':'STABILIZER','III':'ACTIVATOR'};
+  const parts=[['III',fragments.III],['I',fragments.I],['II',fragments.II]];
   return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[1][role][1]}</p><div class="paper-pieces">${parts.map(([num,label])=>`<button class="paper-piece ${m.progress.includes(num)?'placed':''}" data-fragment="${num}" ${m.progress.includes(num)?'disabled':''}><span>FRAGMENT ${num}</span><b>${label}</b></button>`).join('')}</div><div class="mini-status">Restored pages: ${m.progress.join(' → ')||'—'}</div></div>`;
  }
- if(stage===1&&role==='chameleon')return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[1][role][1]}</p><div class="whisk-setup">${vialArt('violet','','')}<div class="whisk ${m.count%2?'whisk-turn':''}">⟳</div><button class="btn amber mini-action" data-minitap="stir">⚗ STIR SAMPLE</button><div class="charge-track"><div style="width:${m.count/6*100}%"></div></div><div class="mini-status">${m.count}/6 turns mixed</div></div></div>`;
- if(stage===2&&role==='mouse')return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[2][role][1]}</p><div class="equation-panel"><div>3 × 4 + 5 = <b>?</b></div><form id="equation-form" class="mini-form"><input name="answer" type="number" inputmode="numeric" placeholder="?" aria-label="Power calibration result" required/><button class="btn amber">CALIBRATE</button></form><div id="mini-feedback" class="mini-status" aria-live="polite">Enter the total required power units.</div></div></div>`;
- if(stage===2&&role==='chameleon')return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[2][role][1]}</p><div class="frequency-bands">${[['high','▂▅█','HIGH'],['low','▁▂▃','LOW'],['mid','▁▄▆','MID']].map(([k,g,label])=>`<button class="frequency ${m.progress.includes(k)?'placed':''}" data-frequency="${k}" ${m.progress.includes(k)?'disabled':''}><span>${g}</span><b>${label}</b></button>`).join('')}</div><div class="mini-status">Signal locked: ${m.progress.join(' → ')||'—'}</div></div>`;
+ if(stage===1&&role==='chameleon')return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[1][role][1]}</p><div class="whisk-setup"><div class="gesture-wheel reagent" data-gesture="stir" role="img" aria-label="Drag in circles inside the reagent vessel"><div class="reagent-liquid"></div><div class="reagent-bubbles">◦ ✧ ◦</div><div class="reagent-spoon">⚗</div></div><div class="charge-track"><div style="width:${Math.min(100,m.count/(game.taskConfig?.turns||3)*100)}%"></div></div><div class="mini-status">${Math.floor(m.count*10)/10}/${game.taskConfig?.turns||3} circular stirs</div></div></div>`;
+ if(stage===2&&role==='mouse'){
+  const cfg=game.taskConfig||{coils:3,draw:4,reserve:5};
+  return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[2][role][1]}</p><div class="equation-panel"><div>${cfg.coils} × ${cfg.draw} + ${cfg.reserve} = <b>?</b></div><form id="equation-form" class="mini-form"><input name="answer" type="number" inputmode="numeric" placeholder="?" aria-label="Power calibration result" required/><button class="btn amber">CALIBRATE</button></form><div id="mini-feedback" class="mini-status" aria-live="polite">Enter the total required power units.</div></div></div>`;
+ }
+ if(stage===2&&role==='chameleon'){
+  const freqs=game.taskConfig?.frequencies||{a:240,b:680,c:410};
+  return `<div class="mini-task"><p class="mini-instruction">${mechanismSpecs[2][role][1]}</p><div class="frequency-bands">${['a','b','c'].map((k,i)=>`<button class="frequency ${m.progress.includes(k)?'placed':''}" data-frequency="${k}" ${m.progress.includes(k)?'disabled':''}><span>${['▂▅█','▁▂▃','▁▄▆'][i]}</span><b>RELAY ${k.toUpperCase()}</b><small>${freqs[k]} Hz</small></button>`).join('')}</div><div class="mini-status">Signal locked: ${m.progress.join(' → ')||'—'}</div></div>`;
+ }
  return '';
 }
 function showTaskPopup(){
@@ -147,30 +148,79 @@ function showTaskPopup(){
  if(game.revealed[game.you.role]){showCluePopup();return;}
  const [title]=mechanismSpecs[game.stage][game.you.role];
  showPopup('INTERACTIVE LAB MECHANISM',title,'',taskMarkup());
+ miniModalActive=true;
+ send('work_start',{target:'clue'});
+ if(game.stage===0 && game.you.role==='mouse')requestAnimationFrame(redrawWireLinks);
 }
-function refreshTask(){const graphic=document.querySelector('#paws-modal-layer .inspect-graphic');if(graphic)graphic.innerHTML=taskMarkup();}
-function finishTask(proof){sound('unlock');closePopup();send('complete_task',{proof});}
+function refreshTask(){const graphic=document.querySelector('#paws-modal-layer .inspect-graphic');if(graphic){graphic.innerHTML=taskMarkup();if(game.stage===0&&game.you.role==='mouse')requestAnimationFrame(redrawWireLinks);}}
+function finishTask(proof){sound('unlock');closePopup(false);send('complete_task',{proof});}
 function taskMisstep(msg){sound('error');const el=document.querySelector('#paws-modal-layer .mini-status');if(el)el.textContent=msg;}
 function taskInteraction(btn){
  const s=game.stage,r=game.you.role,m=getTask();
- if(s===0&&r==='mouse'){
-  if(btn.dataset.wire){m.selected=btn.dataset.wire;refreshTask();return;}
-  if(btn.dataset.socket){const col=btn.dataset.socket;
-   if(m.selected===col&&!m.progress.includes(col)){m.progress.push(col);m.selected=null;sound('vial');if(m.progress.length===4)return finishTask(['red','blue','green','yellow']);refreshTask();}
-   else taskMisstep('That socket does not match the selected wire.');return;
-  }
- }
- if(s===0&&r==='chameleon'&&btn.dataset.minitap==='charge'){m.count++;sound('lever');if(m.count>=5)return finishTask('uv-charged');refreshTask();return;}
  if(s===1&&r==='mouse'&&btn.dataset.fragment){const expected=['I','II','III'][m.progress.length];if(btn.dataset.fragment===expected){m.progress.push(expected);sound('tap');if(m.progress.length===3)return finishTask(['I','II','III']);refreshTask();}else{m.progress=[];refreshTask();taskMisstep('The paper edges do not line up. Try the order again.');}return;}
- if(s===1&&r==='chameleon'&&btn.dataset.minitap==='stir'){m.count++;sound('vial');if(m.count>=6)return finishTask('vials-whisked');refreshTask();return;}
- if(s===2&&r==='chameleon'&&btn.dataset.frequency){const expected=['low','mid','high'][m.progress.length];if(btn.dataset.frequency===expected){m.progress.push(expected);sound('clue');if(m.progress.length===3)return finishTask(['low','mid','high']);refreshTask();}else{m.progress=[];refreshTask();taskMisstep('Frequency interference! Start from the lowest signal.');}return;}
+ if(s===2&&r==='chameleon'&&btn.dataset.frequency){const hz=game.taskConfig?.frequencies||{a:240,b:680,c:410};const sorted=Object.keys(hz).sort((a,b)=>hz[a]-hz[b]);const expected=sorted[m.progress.length];if(btn.dataset.frequency===expected){m.progress.push(expected);sound('clue');if(m.progress.length===3)return finishTask(sorted);refreshTask();}else{m.progress=[];refreshTask();taskMisstep('Frequency interference! Start from the lowest signal.');}return;}
+}
+function pointIn(el,x,y){const r=el.getBoundingClientRect();return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom;}
+function center(el){const r=el.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};}
+function redrawWireLinks(){
+ const board=document.querySelector('.wire-drag-board');if(!board)return;
+ const svg=board.querySelector('.wire-svg'), g=board.querySelector('.wire-connections');const r=board.getBoundingClientRect();
+ svg.setAttribute('viewBox',`0 0 ${r.width} ${r.height}`);
+ const m=getTask();g.innerHTML=m.progress.map(col=>{
+  const a=board.querySelector(`[data-wire="${col}"]`), b=board.querySelector(`[data-socket="${col}"]`);if(!a||!b)return '';
+  const ar=a.getBoundingClientRect(),br=b.getBoundingClientRect(),x1=ar.right-r.left,y1=ar.top+ar.height/2-r.top,x2=br.left-r.left,y2=br.top+br.height/2-r.top;
+  return `<path d="M${x1} ${y1} C${x1+34} ${y1},${x2-34} ${y2},${x2} ${y2}" stroke="${{red:'#e96670',blue:'#75b5e6',green:'#80c9a0',yellow:'#f8d17e'}[col]}" stroke-width="6" fill="none" stroke-linecap="round"/>`;
+ }).join('');
+}
+function updateWirePreview(x,y){
+ const d=dragState;if(!d||d.type!=='wire')return;
+ const board=d.board,r=board.getBoundingClientRect(),start=d.from.getBoundingClientRect(),x1=start.right-r.left,y1=start.top+start.height/2-r.top;
+ const px=x-r.left,py=y-r.top;
+ board.querySelector('.wire-preview')?.setAttribute('d',`M${x1} ${y1} Q${(x1+px)/2} ${py-14},${px} ${py}`);
+}
+function startDrag(e){
+ const wire=e.target.closest('[data-wire]');const wheel=e.target.closest('[data-gesture]');
+ if(wire&&!wire.disabled){e.preventDefault();const board=wire.closest('.wire-drag-board');dragState={type:'wire',col:wire.dataset.wire,from:wire,board,pointer:e.pointerId};wire.setPointerCapture(e.pointerId);updateWirePreview(e.clientX,e.clientY);return;}
+ if(wheel){e.preventDefault();const p=center(wheel),dx=e.clientX-p.x,dy=e.clientY-p.y,r=Math.hypot(dx,dy),size=wheel.getBoundingClientRect().width;
+  if(r<size*.12||r>size*.65)return;
+  dragState={type:'circle',pointer:e.pointerId,from:wheel,center:p,last:Math.atan2(dy,dx),total:0,gesture:wheel.dataset.gesture};wheel.setPointerCapture(e.pointerId);
+ }
+}
+function trackDrag(e){
+ if(!dragState||dragState.pointer!==e.pointerId)return;
+ if(dragState.type==='wire'){updateWirePreview(e.clientX,e.clientY);return;}
+ const d=dragState,dx=e.clientX-d.center.x,dy=e.clientY-d.center.y,r=Math.hypot(dx,dy),size=d.from.getBoundingClientRect().width;
+ if(r<size*.12||r>size*.7){d.last=null;return;}
+ const a=Math.atan2(dy,dx);if(d.last!==null){let diff=a-d.last;while(diff>Math.PI)diff-=2*Math.PI;while(diff< -Math.PI)diff+=2*Math.PI;if(Math.abs(diff)<1){d.total+=diff;}}
+ d.last=a;
+ const m=getTask();const turns=game.taskConfig?.turns||3;m.count=Math.min(turns,Math.abs(d.total)/(2*Math.PI));
+ const track=document.querySelector('.mini-task .charge-track>div');if(track)track.style.width=`${m.count/(game.taskConfig?.turns||3)*100}%`;
+ const status=document.querySelector('.mini-task .mini-status');if(status)status.textContent=`${m.count.toFixed(1)}/${game.taskConfig?.turns||3} circular ${d.gesture==='crank'?'turns · UV charge':'stirs'}`;
+ const knob=d.from.querySelector('.gesture-knob,.reagent-spoon');if(knob)knob.style.transform=`rotate(${d.total}rad)`;
+}
+function endDrag(e){
+ const d=dragState;if(!d||d.pointer!==e.pointerId)return;
+ dragState=null;
+ if(d.type==='wire'){
+  const col=d.col,board=d.board,socket=board.querySelector(`[data-socket="${col}"]`),hits=board.querySelectorAll('[data-socket]');
+  const found=[...hits].find(el=>pointIn(el,e.clientX,e.clientY));
+  if(found&&found===socket&&!getTask().progress.includes(col)){
+   getTask().progress.push(col);sound('vial');if(getTask().progress.length===4){finishTask(['red','blue','green','yellow']);return;}refreshTask();
+  }else{board.querySelector('.wire-preview')?.setAttribute('d','');taskMisstep(found?'Wrong connector. Follow the wire color.':'Drag all the way to a matching socket before releasing.');}
+  return;
+ }
+ if(d.type==='circle'){
+  if(getTask().count>=(game.taskConfig?.turns||3)-.1){finishTask(d.gesture==='crank'?'uv-charged':'vials-whisked');return;}
+  getTask().count=0;taskMisstep('Keep tracing complete circles around the center until the meter is full.');
+  const bar=document.querySelector('.mini-task .charge-track>div');if(bar)bar.style.width='0%';
+ }
 }
 function genericDiagram() {
  if(game.stage===1)return `<div class="vial-gallery">${vialArt('violet','VIOLET')}${vialArt('amber','AMBER')}${vialArt('cyan','CYAN')}</div>`;
  if(game.stage===0)return `<div class="mystery-diagram"><span>▥</span><b>LOCKED</b><span>▣</span></div>`;
  return `<div class="mystery-diagram"><span>⚡</span><b>SECURITY RELAY</b><span>⚙</span></div>`;
 }
-function closePopup() {const layer=document.getElementById('paws-modal-layer');if(layer)layer.remove();}
+function closePopup(announce=true) {if(miniModalActive && announce && game?.status==='playing')send('work_stop');miniModalActive=false;dragState=null;const layer=document.getElementById('paws-modal-layer');if(layer)layer.remove();}
 function showPopup(label,title,description,diagram) {
  closePopup();
  const layer=document.createElement('div');layer.id='paws-modal-layer';layer.className='inspect-overlay';
@@ -184,13 +234,13 @@ function showVialPopup(color){
  showPopup('REAGENT SELECTED',title,`Added vial ${seq.length} of 3 to the mixer. Return to the formula station to select the next vial or mix your completed sequence.`,
  `<div class="vial-gallery selected-vial">${vialArt(color,title)}<div class="vial-progress"><b>FORMULA QUEUE</b><div class="vial-minirow">${[0,1,2].map(i=>seq[i]?vialArt(seq[i],'', 'mini'):`<span class="empty-mini">?</span>`).join('')}</div></div></div>`);
 }
-const header = (right='') => `<div class="shell-top"><div class="brand"><span class="brandmark">✦</span><span>OPERATION P.A.W.S.</span></div><div class="top-right"><button class="sound-toggle" data-action="toggle-sound" aria-pressed="${soundOn}" aria-label="${soundOn?'Mute sound effects':'Enable sound effects'}">${soundOn?'♫ SOUND ON':'♪ SOUND OFF'}</button><button class="sound-toggle" data-action="toggle-music" aria-pressed="${musicOn}" aria-label="Toggle background music">${musicOn?'♫ MUSIC ON':'♪ MUSIC OFF'}</button><span class="pill">CO-OP ESCAPE ROOM</span>${right}</div></div>`;
-const footer = () => `<div class="footer"><span>PROJECT P.A.W.S. / EXPERIMENT NO. 042</span><span>KEEP YOUR PAWS OFF THE LASERS.</span></div>`;
+const header = (right='') => `<div class="shell-top"><div class="brand"><span class="brandmark">✦</span><span>OPERATION LAB ESCAPE</span></div><div class="top-right"><button class="sound-toggle" data-action="toggle-sound" aria-pressed="${soundOn}" aria-label="${soundOn?'Mute sound effects':'Enable sound effects'}">${soundOn?'♫ SOUND ON':'♪ SOUND OFF'}</button><button class="sound-toggle" data-action="toggle-music" aria-pressed="${musicOn}" aria-label="Toggle background music">${musicOn?'♫ MUSIC ON':'♪ MUSIC OFF'}</button><span class="pill">CO-OP ESCAPE ROOM</span>${right}</div></div>`;
+const footer = () => `<div class="footer"><span>LAB ESCAPE / EXPERIMENT NO. 042</span><span>CONTAINMENT IS NOT AN OPTION.</span></div>`;
 function toast(message) {const el=$('toast'); el.textContent=message;el.style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.style.display='none',5000);}
 function landing(){
  const code=(new URLSearchParams(location.search).get('room')||'').toUpperCase().slice(0,5);
- app.innerHTML=header('<span class="pill orange">ALPHA BUILD 0.5</span>')+`
- <main class="hero"><section><div class="eyebrow">✧ PROTOCOL: BREAK OUT ✧</div><h1>TINY PAWS.<br><span>BIG ESCAPE.</span></h1>
+ app.innerHTML=header('<span class="pill orange">ALPHA BUILD 0.7</span>')+`
+ <main class="hero"><section><div class="eyebrow">✧ PROTOCOL: BREAK OUT ✧</div><h1>BREAK CONTAINMENT.<br><span>ESCAPE TOGETHER.</span></h1>
  <p>Two experimental animals. One locked-down laboratory. Different clues on every screen. <b class="teal">You can only escape together.</b></p>
  <div class="hero-bits"><span class="pill">2 PLAYERS</span><span class="pill">3 PUZZLE ROOMS</span><span class="pill">REAL-TIME CO-OP</span></div>
  <div class="login">
@@ -209,7 +259,7 @@ function connect(){
  socket.onopen=()=>{ if(game) toast('Connected to the laboratory network.'); };
  socket.onmessage=(e)=>{try{const msg=JSON.parse(e.data);if(msg.type==='state'){const previous=game;game=msg.data;timerOffset=game.serverTime-Date.now()/1000;
  const newRoom=previous?.stage!==game.stage;
- if(newRoom){seq=[];enterCode='';miniTask=null;closePopup();}
+ if(newRoom){seq=[];enterCode='';miniTask=null;closePopup(false);previousCanvasStage=-1;}
  render();
  if(previous?.status==='playing'&&game.status==='won'){sound('victory');}
  else if(previous?.status==='playing'&&game.status==='playing'&&newRoom){sound('unlock');}
@@ -276,7 +326,7 @@ function play(){const role=game.you.role;const s=game.stage;
 </aside>
  <main class="scene-col"><div class="scene-top"><span class="roomname">◈ ${names[s]}</span><span class="signal">● LAB SECURITY: ${s===2&&game.powered?'COMPROMISED':'ACTIVE'}</span></div>
  <div class="scene-wrap"><canvas id="lab-canvas" width="320" height="180" aria-label="Interactive pixel-art escape room"></canvas>${sceneControls()}</div>
- <div class="scene-foot"><span class="actor">${roleIcon(role)} ${esc(game.you.name)} · ${roleName(role)}</span><span>Tap glowing objects to investigate ▲</span></div>${terminal()}
+ <div class="scene-foot"><span class="actor">${roleIcon(role)} ${esc(game.you.name)} · ${roleName(role)}</span><span>${Object.entries(game.actors||{}).filter(([r,a])=>a.working&&r!==role).map(([r,a])=>`<b class="working-live">⚙ ${esc(playerName(r))} is working at their ${a.target==='clue'?'clue':'station'}...</b>`).join('')||'Tap glowing objects to investigate ▲'}</span></div>${terminal()}
  </main>
  <aside class="side right"><div class="panel tight"><div class="panelhead"><span class="smalllabel">TEAM RADIO / CHAT</span><span class="teal">● LIVE</span></div>
  <div class="chat-wrap" id="chatlog">${game.messages.length?game.messages.map(m=>`<div class="msg ${m.role}"><div class="msghead">${roleIcon(m.role)} ${esc(m.name)}</div>${esc(m.message)}</div>`).join(''):'<p class="muted tiny">Tell your teammate what you see! Every animal has a different clue.</p>'}</div>
@@ -299,34 +349,40 @@ document.addEventListener('submit', async e=>{
  if(e.target.id==='create-form'){e.preventDefault();try{const data=await post('/api/create',{name:e.target.elements.namedItem('name').value});saveSession(data);}catch(err){toast(err.message);}}
  if(e.target.id==='join-form'){e.preventDefault();try{const d=await post('/api/join',{name:e.target.elements.namedItem('name').value,room:e.target.elements.namedItem('room').value.toUpperCase()});saveSession(d);}catch(err){toast(err.message);}}
  if(e.target.id==='chat-form'){e.preventDefault();const msg=$('chat-text')?.value.trim();if(msg){sound('chat');send('chat',{message:msg});}chatDraft='';if($('chat-text'))$('chat-text').value='';}
- if(e.target.id==='equation-form'){e.preventDefault();const val=e.target.elements.namedItem('answer').value.trim();if(val==='17')finishTask('17');else taskMisstep('The load is incorrect. Check the coils and reserve units.');return;}
+ if(e.target.id==='equation-form'){e.preventDefault();const val=e.target.elements.namedItem('answer').value.trim();if(Number(val)===game.taskConfig?.answer)finishTask(val);else taskMisstep('The load is incorrect. Check the coils and reserve units.');return;}
  if(e.target.id==='code-form'){e.preventDefault();const pin=$('pin')?.value.trim();if(pin&&pin.length===4){sound('tap');send('submit_code',{code:pin});}}
 });
+document.addEventListener('focusin',e=>{if(e.target.id==='pin')send('move_to',{target:'terminal'});});
 document.addEventListener('input',e=>{if(e.target.id==='chat-text')chatDraft=e.target.value;if(e.target.id==='pin')enterCode=e.target.value.replace(/\D/g,'').slice(0,4);});
 document.addEventListener('click',e=>{
  if(e.target.id==='paws-modal-layer'){closePopup();return;}
- const v=e.target.closest('[data-vial]');if(v){if(seq.length<3){seq.push(v.dataset.vial);sound('vial');play();}return;}
- const mini=e.target.closest('[data-wire],[data-socket],[data-minitap],[data-fragment],[data-frequency]');if(mini){if(!mini.disabled)taskInteraction(mini);return;}
+ const v=e.target.closest('[data-vial]');if(v){if(seq.length<3){if(seq.length===0)send('move_to',{target:'terminal'});seq.push(v.dataset.vial);sound('vial');play();}return;}
+ const mini=e.target.closest('[data-fragment],[data-frequency]');if(mini){if(!mini.disabled)taskInteraction(mini);return;}
  const b=e.target.closest('[data-action]');if(!b||b.disabled)return;
  const a=b.dataset.action;
  if(a==='close-modal'){closePopup();return;}
- if(a==='view-clue'){sound('clue');showCluePopup();return;}
+ if(a==='view-clue'){sound('clue');send('move_to',{target:'clue'});showCluePopup();return;}
  if(a==='mini-task'){sound('tap');showTaskPopup();return;}
  if(a==='view-hint'){sound('hint');showHintPopup();return;}
  if(a==='toggle-music'){musicOn=!musicOn;try{localStorage.setItem('paws-music',musicOn?'on':'off');}catch{}if(musicOn)startMusic();else stopMusic();updateMusicButton();return;}
  if(a==='toggle-sound'){soundOn=!soundOn;try{localStorage.setItem('paws-sound',soundOn?'on':'off');}catch{}updateSoundButton();if(soundOn)sound('vial');return;}
- if(['start','reveal','hint','lever','swap_roles','restart'].includes(a)){sound(a==='lever'?'lever':'tap');send(a);return;}
+ if(['start','reveal','hint','lever','swap_roles','restart'].includes(a)){sound(a==='lever'?'lever':'tap');if(a==='lever')send('move_to',{target:'lever'});send(a);return;}
  if(a==='copy-code'){copy(game.room);return;}
  if(a==='copy-link'){copy(`${location.origin}/?room=${game.room}`);return;}
  if(a==='clear-vials'){seq=[];sound('tap');play();return;}
  if(a==='mix'){sound('vial');send('mix',{sequence:seq});return;}
- if(a==='focus-code'||a==='focus-mix'){const elem=$('terminal');if(elem){elem.scrollIntoView({behavior:'smooth',block:'nearest'});if(a==='focus-code')$('pin')?.focus();}return;}
+ if(a==='focus-code'||a==='focus-mix'){send('move_to',{target:'terminal'});const elem=$('terminal');if(elem){elem.scrollIntoView({behavior:'smooth',block:'nearest'});if(a==='focus-code')$('pin')?.focus();}return;}
  if(a==='replay-victory'){victory();sound('victory');return;}
  if(a==='reconnect'){connect();return;}
  if(a==='home'){sessionStorage.removeItem('paws-session');session=null;game=null;landing();return;}
 });
+document.addEventListener('pointerdown',startDrag);
+document.addEventListener('pointermove',trackDrag);
+document.addEventListener('pointerup',endDrag);
+document.addEventListener('pointercancel',e=>{if(dragState?.pointer===e.pointerId){dragState=null;const pr=document.querySelector('.wire-preview');if(pr)pr.setAttribute('d','');}});
+window.addEventListener('resize',()=>requestAnimationFrame(redrawWireLinks));
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePopup();});
-setInterval(()=>{updateTime();if($('lab-canvas'))drawScene(game?.stage??0,game?.you?.role??'mouse',game?.powered??false,game?.revealed?.[game?.you?.role]??false);},400);
+setInterval(()=>{updateTime();if($('lab-canvas'))drawScene(game?.stage??0,game?.you?.role??'mouse',game?.powered??false,game?.revealed?.[game?.you?.role]??false);},55);
 // Original 320×180 procedural pixel-art scenes, now restyled with a whimsical gothic pixel look.
 function drawScene(stage,role,powered,revealed){
  const canvas=$('lab-canvas');if(!canvas)return;
@@ -385,7 +441,7 @@ function drawScene(stage,role,powered,revealed){
    rect(140,49,42,84,'#17121a');rect(143,52,36,78,'#453b46');for(let y=58;y<117;y+=11)rect(144,y,34,2,'#7c7280');rect(154,113,18,5,'#b58064');
    occultRing(160,92,11,revealed&&role==='chameleon'?'#85ddb8':'#4d4452');
    text('SUBJECT 01',31,55,6,'#d2c2ba');text('SUBJECT 02',204,55,6,'#d2c2ba');
-   if(revealed&&role==='chameleon'){rect(218,14,66,18,'#284c42');text('UV: G R Y B',223,26,7,'#bdf9de');}
+   if(revealed&&role==='chameleon'){rect(218,14,66,18,'#284c42');text('UV ACTIVE',223,26,7,'#bdf9de');}
  }
  if(stage===1){
    for(let i=0;i<3;i++){
@@ -422,8 +478,25 @@ function drawScene(stage,role,powered,revealed){
    rect(x+7,y+29,4,3,'#36533d');rect(x+18,y+29,4,3,'#36533d');rect(x+10,y+19,3,9,'#86b381');rect(x+20,y+19,3,9,'#86b381');
    rect(x+22,y+20,6,3,'#3a5d43');rect(x+26,y+23,4,3,'#3a5d43');rect(x+23,y+26,4,3,'#86b381');rect(x+20,y+28,3,3,'#3a5d43');
  }
- const bob=Math.floor(Date.now()/550)%2;
- drawMouse(role==='mouse'?78:72,140+bob); drawChameleon(role==='chameleon'?226:220,140+(bob?0:1));
+ const actors=game?.status==='playing' && game?.stage===stage ? game.actors : null;
+ if(previousCanvasStage!==stage){actorDisplay={mouse:139,chameleon:179};previousCanvasStage=stage;}
+ const bob=Math.floor(Date.now()/450)%2;
+ for(const kind of ['mouse','chameleon']){
+  const target=actors?.[kind]?.x ?? (kind==='mouse'?139:179);
+  actorDisplay[kind]+=(target-actorDisplay[kind])*.14;
+  if(Math.abs(target-actorDisplay[kind])<.35)actorDisplay[kind]=target;
+  const moving=Math.abs(target-actorDisplay[kind])>1.5;
+  const working=!!actors?.[kind]?.working;
+  const x=Math.round(actorDisplay[kind]),y=140+(moving ? Math.floor(Date.now()/110)%3 : working ? Math.floor(Date.now()/250)%2 : bob);
+  if(kind==='mouse')drawMouse(x,y);else drawChameleon(x,y);
+  if(working){
+    const phase=Math.floor(Date.now()/220)%4;
+    const sparks=['✦','⚙','✧','✦'];
+    text(sparks[phase],x+11,y-7,13,'#f3d38c');
+    rect(x+2,y-13,27,3,'#2b2028');rect(x+2,y-13,8+phase*6,3,'#8fdd97');
+    text('WORK',x+3,y-18,6,'#eecdb0');
+  }else if(moving){rect(x+8,y+32,4,1,'#c3a38f');rect(x+3,y+32,3,1,'#b68c82');}
+ }
  if(stage!==3){text('✦',role==='mouse'?92:241,137,10,'#f5d48b');}
  const glow=c.createRadialGradient(stage===1?162:60,62,5,stage===1?162:60,62,120);
  glow.addColorStop(0,stage===3?'#8ac09333':'#bb314126');glow.addColorStop(1,'#01030c00');c.fillStyle=glow;c.fillRect(0,0,320,180);
