@@ -89,9 +89,18 @@ function updateMusicButton(){
   btn.setAttribute('aria-pressed',String(musicOn));
  }
 }
-// Music begins after the first click/tap/key press so it also works on phones.
-document.addEventListener('pointerdown',()=>{if(musicOn)startMusic();},{passive:true});
-document.addEventListener('keydown',()=>{if(musicOn)startMusic();});
+// Start on an actual user gesture. Touch browsers commonly grant media-playback
+// permission on pointerup/touchend or click, rather than pointerdown.
+// Keep click as a fallback for keyboard-activated buttons and older devices.
+function startMusicFromGesture(event){
+ if(event.type === 'pointerdown' && event.pointerType && event.pointerType !== 'mouse') return;
+ startMusic();
+}
+document.addEventListener('pointerdown',startMusicFromGesture,{passive:true});
+document.addEventListener('pointerup',startMusicFromGesture,{passive:true});
+document.addEventListener('touchend',startMusicFromGesture,{passive:true});
+document.addEventListener('click',startMusicFromGesture);
+document.addEventListener('keydown',startMusicFromGesture);
 function updateSoundButton() {
  const btn=document.querySelector('[data-action="toggle-sound"]');
  if(btn) {btn.textContent=soundOn?'♫ SOUND ON':'♪ SOUND OFF';btn.setAttribute('aria-pressed',String(soundOn));btn.setAttribute('aria-label',soundOn?'Mute sound effects':'Enable sound effects');}
